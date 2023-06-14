@@ -1,74 +1,86 @@
-const express = require("express");
-const axios = require("axios");
-const cheerio = require("cheerio");
-const urlModule = require("url");
-const { createObjectCsvWriter } = require("csv-writer");
-const Database = require("better-sqlite3");
+const express = require('express');
+const axios = require('axios');
+const { parse } = require('node-html-parser');
+const urlModule = require('url');
+const { createObjectCsvWriter } = require('csv-writer');
+const Database = require('better-sqlite3');
 
 const app = express();
 const port = 3000;
 
-const db = new Database(":memory:");
+const db = new Database(':memory:'); // Creates a database in memory by default
+const stmt = db.prepare(`CREATE TABLE IF NOT EXISTS scraped_data (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  url TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  price TEXT NOT NULL,
+  success INTEGER NOT NULL,
+  last_updated INTEGER NOT NULL
+)`);
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS scraped_data (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    url TEXT NOT NULL,
-    domain TEXT NOT NULL,
-    price TEXT NOT NULL,
-    success INTEGER NOT NULL,
-    last_updated INTEGER NOT NULL
-  )
-`);
+stmt.run();
 
 app.use(express.json());
 
 const scrapePrice = async (url, cacheExpiryMinutes) => {
-  let price = "0";
+  const startTime = Date.now(); 
+  let price = "0"; // default price
   let success = true;
-  const domain = new urlModule.URL(url).hostname.replace("www.", "");
-  const selectQuery = db.prepare(
-    `SELECT * FROM scraped_data WHERE url = ? AND last_updated > ?`
-  );
-  const currentTime = Date.now() - cacheExpiryMinutes * 60 * 1000;
+  const domain = new urlModule.URL(url).hostname.replace('www.', ''); // remove www.
+  const selectQuery = db.prepare(`SELECT * FROM scraped_data WHERE url = ? AND last_updated > ?`);
+  const currentTime = Date.now() - cacheExpiryMinutes * 60 * 1000; // Calculate the expiry time in milliseconds
   const currentTimeStamp = Date.now();
+  let elapsedTime;
 
   try {
     const cachedData = selectQuery.get(url, currentTime);
 
     if (cachedData) {
-      return buildResponse(cachedData, true);
+      return {
+        url: cachedData.url,
+        domain: cachedData.domain,
+        price: cachedData.price,
+        success: cachedData.success === 1,
+        lastUpdated: cachedData.last_updated,
+        isCached: true
+      };
     }
 
     const { data } = await axios.get(url);
-    const $ = cheerio.load(data);
+    const root = parse(data);
     const priceRegex = /\d+(\.\d{1,2})?/;
 
-    $("*")
-      .filter((i, el) => {
-        return (
-          ($(el).attr("class") &&
-            $(el).attr("class").toLowerCase().includes("price")) ||
-          ($(el).attr("id") && $(el).attr("id").toLowerCase().includes("price"))
-        );
-      })
-      .each((index, element) => {
-        const potentialPrice = priceRegex.exec($(element).text());
-        if (potentialPrice && price === "0") {
-          price = potentialPrice[0];
-          return false;
-        }
-      });
+root.querySelectorAll('*').forEach(el => {
+  const classAttr = el.getAttribute('class') || '';
+  const id = el.getAttribute('id') || '';
+  const classNames = classAttr.split(' ');
+  
+  if (
+    (classNames && classNames.some(className => className.toLowerCase().includes('price'))) ||
+    (id && id.toLowerCase().includes('price'))
+  ) {
+    const potentialPrice = priceRegex.exec(el.rawText);
+    if (potentialPrice && price === "0") {
+      price = potentialPrice[0];
+    }
+  }
+});
 
-    const insertQuery = db.prepare(
-      `INSERT INTO scraped_data (url, domain, price, success, last_updated) VALUES (?, ?, ?, ?, ?)`
-    );
-    insertQuery.run(url, domain, price, success ? 1 : 0, currentTimeStamp);
+elapsedTime = Date.now() - startTime;
+console.log(`Scraped ${url} in ${elapsedTime}ms`);
+  
+    db.prepare(`INSERT INTO scraped_data (url, domain, price, success, last_updated) VALUES (?, ?, ?, ?, ?)`)
+      .run(url, domain, price, success ? 1 : 0, currentTimeStamp);
 
-    return buildResponse(
-      { url, domain, price, success, last_updated: currentTimeStamp },
-      false
-    );
+    return {
+      url: url,
+      domain: domain,
+      price: price,
+      success: success,
+      lastUpdated: currentTimeStamp,
+      isCached: false
+    };
+
   } catch (error) {
     console.error(`Error while scraping ${url}: ${error}`);
     success = false;
@@ -76,192 +88,162 @@ const scrapePrice = async (url, cacheExpiryMinutes) => {
     const cachedData = selectQuery.get(url, currentTime);
 
     if (cachedData) {
-      return buildResponse(cachedData, true);
+      return {
+        url: cachedData.url,
+        domain: cachedData.domain,
+        price: cachedData.price,
+        success: cachedData.success === 1,
+        lastUpdated: cachedData.last_updated,
+        isCached: true
+      };
     }
 
-    const insertQuery = db.prepare(
-      `INSERT INTO scraped_data (url, domain, price, success, last_updated) VALUES (?, ?, ?, ?, ?)`
-    );
-    insertQuery.run(url, domain, price, success ? 1 : 0, currentTimeStamp);
+    db.prepare(`INSERT INTO scraped_data (url, domain, price, success, last_updated) VALUES (?, ?, ?, ?, ?)`)
+      .run(url, domain, price, success ? 1 : 0, currentTimeStamp);
 
-    return buildResponse(
-      { url, domain, price, success, last_updated: currentTimeStamp },
-      false
-    );
+    return {
+      url: url,
+      domain: domain,
+      price: price,
+      success: success,
+      lastUpdated: currentTimeStamp,
+      isCached: false
+    };
   }
 };
 
-const buildResponse = (data, isCached) => {
-  return {
-    url: data.url,
-    domain: data.domain,
-    price: data.price,
-    success: data.success === 1,
-    lastUpdated: data.last_updated,
-    isCached: isCached,
-  };
-};
-
-app.get("/scrape", async (req, res) => {
+app.get('/scrape', async (req, res) => {
   const { url, cacheExpiryMinutes = 60 } = req.query;
 
   if (!url) {
     return res.status(400).json({
-      error: "Missing URL parameter",
+      error: 'Missing URL parameter'
     });
   }
 
-  const urls = url.split(",");
+  const urls = url.split(',');
 
   try {
-    const prices = await Promise.all(
-      urls.map((url) => scrapePrice(url, cacheExpiryMinutes))
-    );
+    const prices = await Promise.all(urls.map(url => scrapePrice(url, cacheExpiryMinutes)));
 
-    const numericPrices = prices
-      .map((pair) => parseFloat(pair.price))
-      .filter((price) => price > 0);
+    const numericPrices = prices.map(pair => parseFloat(pair.price)).filter(price => price > 0);
 
     if (!numericPrices.length) {
       return res.status(404).json({
-        error: "Price(s) not found",
+        error: 'Price(s) not found'
       });
     }
 
     const bestPrice = Math.min(...numericPrices);
     const worstPrice = Math.max(...numericPrices);
-    const averagePrice = (
-      numericPrices.reduce((a, b) => a + b, 0) / numericPrices.length
-    ).toFixed(2);
+    const averagePrice = (numericPrices.reduce((a, b) => a + b, 0) / numericPrices.length).toFixed(2);
 
     const response = {
-      prices: prices.map((price) => ({
+      prices: prices.map(price => ({
         url: price.url,
         domain: price.domain,
         price: price.price,
         success: price.success,
         lastUpdated: price.lastUpdated,
-        isCached: price.isCached,
+        isCached: price.isCached
       })),
       metrics: {
         bestPrice: bestPrice.toString(),
         worstPrice: worstPrice.toString(),
-        averagePrice: averagePrice.toString(),
-      },
+        averagePrice: averagePrice.toString()
+      }
     };
 
     return res.json(response);
+
   } catch (error) {
     console.error(`Error: ${error}`);
     return res.status(500).json({
-      error: "An error occurred while scraping",
+      error: 'An error occurred while scraping'
     });
   }
 });
 
-app.post("/scrape", async (req, res) => {
+app.post('/scrape', async (req, res) => {
   const { urls, cacheExpiryMinutes = 60 } = req.body;
 
   if (!urls) {
     return res.status(400).json({
-      error: "Missing urls in request body",
+      error: 'Missing urls in request body'
     });
   }
 
   try {
-    const prices = await Promise.all(
-      urls.map((url) => scrapePrice(url, cacheExpiryMinutes))
-    );
+    const prices = await Promise.all(urls.map(url => scrapePrice(url, cacheExpiryMinutes)));
 
-    if (!prices.length || prices.some((pair) => pair.price === undefined)) {
+    if (!prices.length || prices.some(pair => pair.price === undefined)) {
       return res.status(404).json({
-        error: "Price(s) not found",
+        error: 'Price(s) not found'
       });
     }
 
-    const numericPrices = prices
-      .map((pair) => parseFloat(pair.price))
-      .filter((price) => price > 0);
+    const numericPrices = prices.map(pair => parseFloat(pair.price)).filter(price => price > 0);
 
     const bestPrice = Math.min(...numericPrices);
     const worstPrice = Math.max(...numericPrices);
-    const averagePrice = (
-      numericPrices.reduce((a, b) => a + b, 0) / numericPrices.length
-    ).toFixed(2);
+    const averagePrice = (numericPrices.reduce((a, b) => a + b, 0) / numericPrices.length).toFixed(2);
 
     const response = {
-      prices: prices.map((price) => ({
+      prices: prices.map(price => ({
         url: price.url,
         domain: price.domain,
         price: price.price,
         success: price.success,
         lastUpdated: price.lastUpdated,
-        isCached: price.isCached,
+        isCached: price.isCached
       })),
       metrics: {
         bestPrice: bestPrice.toString(),
         worstPrice: worstPrice.toString(),
-        averagePrice: averagePrice.toString(),
-      },
+        averagePrice: averagePrice.toString()
+      }
     };
 
     return res.json(response);
+
   } catch (error) {
     console.error(`Error: ${error}`);
     return res.status(500).json({
-      error: "An error occurred while scraping",
+      error: 'An error occurred while scraping'
     });
   }
 });
 
-app.get("/export", (req, res) => {
+app.get('/export', (req, res) => {
   const query = `SELECT * FROM scraped_data`;
 
-  db.all(query, (err, rows) => {
-    if (err) {
-      console.error(`Error while fetching data: ${err}`);
-      return res.status(500).json({
-        error: "An error occurred while exporting data",
-      });
-    }
+  const rows = db.prepare(query).all();
 
-    if (rows.length === 0) {
-      return res.status(404).json({
-        error: "No data found",
-      });
-    }
-
-    const csvWriter = createObjectCsvWriter({
-      path: "export.csv",
-      header: [
-        { id: "id", title: "ID" },
-        { id: "url", title: "URL" },
-        { id: "domain", title: "Domain" },
-        { id: "price", title: "Price" },
-        { id: "success", title: "Success" },
-        { id: "last_updated", title: "Last_Updated" },
-      ],
-      encoding: "utf8",
-      alwaysQuote: false,
+  if (rows.length === 0) {
+    return res.status(404).json({
+      error: 'No data found'
     });
+  }
 
-    csvWriter
-      .writeRecords([{}]) // Add an empty row as the header row
-      .then(() => {
-        csvWriter.writeRecords(rows).then(() => {
-          console.log("CSV file created: export.csv");
-          res.sendFile("export.csv", { root: __dirname });
-        });
-      })
-      .catch((err) => {
-        console.error(`Error while creating CSV file: ${err}`);
-        return res.status(500).json({
-          error: "An error occurred while exporting data",
-        });
-      });
+  const csvWriter = createObjectCsvWriter({
+    path: 'export.csv',
+    header: [
+      { id: 'id', title: 'ID' },
+      { id: 'url', title: 'URL' },
+      { id: 'domain', title: 'DOMAIN' },
+      { id: 'price', title: 'PRICE' },
+      { id: 'success', title: 'SUCCESS' },
+      { id: 'last_updated', title: 'LAST_UPDATED' }
+    ]
   });
+
+  csvWriter.writeRecords(rows)
+    .then(() => res.download('export.csv'))
+    .catch(err => res.status(500).json({
+      error: 'An error occurred while exporting'
+    }));
 });
 
 app.listen(port, () => {
-  console.log(`Price scraping API is listening at http://localhost:${port}`);
+  console.log(`Scraper app listening at http://localhost:${port}`);
 });
