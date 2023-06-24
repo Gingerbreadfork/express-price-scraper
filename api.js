@@ -31,7 +31,8 @@ const domainOverrides = [
   { domain: "headshop.com", selector: '#PriceA11y-template--16835002237167__main', decimalSeparator: ','},
   { domain: "storz-bickel.com", selector: "#product-price-17942 > span", decimalSeparator: "," },
   { domain: "headshop.com", selector: "#PriceA11y-template--16835002237167__main"},
-  { domain: "vapor.com", selector: "price__regular"}
+  { domain: "vapor.com", selector: "price__regular"},
+  { domain: "grasscity.com", selector: "span.price", decimalSeparator: "."}
   // Add your domain-specific configurations here
   // Example: { domain: "example.com", selector: "#product-price-17942 > span", decimalSeparator: ',' }
 ];
