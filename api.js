@@ -92,6 +92,7 @@ const scrapePrice = async (url, cacheExpiryMinutes) => {
   } catch (error) {
     console.log(`Failed to scrape URL: ${url}`, error);
     success = false;
+    elapsedTime = Date.now() - startTime;
   }
 
   const insertQuery = db.prepare(`
@@ -106,6 +107,7 @@ const scrapePrice = async (url, cacheExpiryMinutes) => {
     domain,
     price,
     success,
+    lastUpdated: currentTimeStamp,
     elapsedTime,
     isCached: false
   };
@@ -215,8 +217,6 @@ app.get('/scrape', async (req, res) => {
     });
   }
 });
-
-
 
 app.get('/export', (req, res) => {
   const query = `SELECT * FROM scraped_data`;
