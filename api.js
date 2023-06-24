@@ -22,9 +22,9 @@ stmt.run();
 
 app.use(express.json());
 
-const domainSelectors = [
-  { domain: "example.com", selector: "#product-price > span" }
-  // Add more domain-specific selectors here
+const domainOverrides = [
+  { domain: "example.com", selector: "#product-price > span", decimalSeparator: "." }
+  // Optional: Add more domain-specific overrides here
 ];
 
 const scrapePrice = async (url, cacheExpiryMinutes) => {
@@ -53,15 +53,19 @@ const scrapePrice = async (url, cacheExpiryMinutes) => {
 
     const { data } = await axios.get(url);
     const root = parse(data);
-    const priceRegex = /\d+(\.\d{1,2})?/;
 
-    const domainSpecificSelector = domainSelectors.find(e => e.domain === domain);
-    if (domainSpecificSelector) {
-      const priceElement = root.querySelector(domainSpecificSelector.selector);
+    const domainSpecific = domainOverrides.find(e => e.domain === domain);
+    if (domainSpecific) {
+      const priceElement = root.querySelector(domainSpecific.selector);
       if (priceElement) {
-        const potentialPrice = priceRegex.exec(priceElement.rawText);
+        let potentialPrice = priceElement.rawText.replace(/[^\d.,-]/g, '');
         if (potentialPrice) {
-          price = potentialPrice[0];
+          if (domainSpecific.decimalSeparator === ',') {
+            potentialPrice = potentialPrice.replace('.', '').replace(',', '.');
+          } else {
+            potentialPrice = potentialPrice.replace(',', '');
+          }
+          price = potentialPrice;
         }
       }
     } else {
@@ -74,17 +78,18 @@ const scrapePrice = async (url, cacheExpiryMinutes) => {
           (classNames && classNames.some(className => className.toLowerCase().includes('price'))) ||
           (id && id.toLowerCase().includes('price'))
         ) {
-          const potentialPrice = priceRegex.exec(el.rawText);
-          if (potentialPrice && price === "0") {
-            price = potentialPrice[0];
+          let potentialPrice = el.rawText.replace(/[^\d.,-]/g, '');
+          if (potentialPrice) {
+            potentialPrice = potentialPrice.replace(',', '.');
+            price = potentialPrice;
           }
         }
       });
     }
 
-elapsedTime = Date.now() - startTime;
-console.log(`Scraped ${url} in ${elapsedTime}ms`);
-  
+    elapsedTime = Date.now() - startTime;
+    console.log(`Scraped ${url} in ${elapsedTime}ms`);
+
     db.prepare(`INSERT INTO scraped_data (url, domain, price, success, last_updated) VALUES (?, ?, ?, ?, ?)`)
       .run(url, domain, price, success ? 1 : 0, currentTimeStamp);
 
@@ -127,6 +132,7 @@ console.log(`Scraped ${url} in ${elapsedTime}ms`);
     };
   }
 };
+
 
 app.get('/scrape', async (req, res) => {
   const { url, cacheExpiryMinutes = 60 } = req.query;
