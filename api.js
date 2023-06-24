@@ -8,23 +8,25 @@ const Database = require('better-sqlite3');
 const app = express();
 const port = 3000;
 
-const db = new Database(':memory:'); // Creates a database in memory by default
-const stmt = db.prepare(`CREATE TABLE IF NOT EXISTS scraped_data (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  url TEXT NOT NULL,
-  domain TEXT NOT NULL,
-  price TEXT NOT NULL,
-  success INTEGER NOT NULL,
-  last_updated INTEGER NOT NULL
-)`);
+const db = new Database(':memory:');
+const stmt = db.prepare(`
+  CREATE TABLE IF NOT EXISTS scraped_data (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    price TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    last_updated INTEGER NOT NULL
+  )
+`);
 
 stmt.run();
 
 app.use(express.json());
 
 const domainOverrides = [
-  { domain: "example.com", selector: "#product-price > span", decimalSeparator: "." }
-  // Optional: Add more domain-specific overrides here
+  // Add your domain-specific configurations here
+  // Example: { domain: "example.com", selector: "#product-price-17942 > span", decimalSeparator: ',' }
 ];
 
 const scrapePrice = async (url, cacheExpiryMinutes) => {
@@ -36,10 +38,10 @@ const scrapePrice = async (url, cacheExpiryMinutes) => {
   const currentTime = Date.now() - cacheExpiryMinutes * 60 * 1000;
   const currentTimeStamp = Date.now();
   let elapsedTime;
+  const priceRegex = /\d+(\.\d{1,2})?/;
 
   try {
     const cachedData = selectQuery.get(url, currentTime);
-
     if (cachedData) {
       return {
         url: cachedData.url,
@@ -53,100 +55,72 @@ const scrapePrice = async (url, cacheExpiryMinutes) => {
 
     const { data } = await axios.get(url);
     const root = parse(data);
+    let specific = domainOverrides.find(item => item.domain === domain);
 
-    const domainSpecific = domainOverrides.find(e => e.domain === domain);
-    if (domainSpecific) {
-      const priceElement = root.querySelector(domainSpecific.selector);
-      if (priceElement) {
-        let potentialPrice = priceElement.rawText.replace(/[^\d.,-]/g, '');
-        if (potentialPrice) {
-          if (domainSpecific.decimalSeparator === ',') {
-            potentialPrice = potentialPrice.replace('.', '').replace(',', '.');
-          } else {
-            potentialPrice = potentialPrice.replace(',', '');
-          }
-          price = potentialPrice;
-        }
+    let priceElement;
+
+    // Check if a specific configuration is found for the domain
+    if (specific) {
+      priceElement = root.querySelector(specific.selector);
+
+      if (priceElement && specific.decimalSeparator) {
+        const potentialPrice = priceElement.text.replace(specific.decimalSeparator, '.').replace(/[^0-9\.]/g, '');
+        price = parseFloat(potentialPrice) || price;
+        price = price.toString();
       }
-    } else {
+    }
+
+    if (!priceElement) {
       root.querySelectorAll('*').forEach(el => {
         const classAttr = el.getAttribute('class') || '';
         const id = el.getAttribute('id') || '';
         const classNames = classAttr.split(' ');
-        
+
         if (
           (classNames && classNames.some(className => className.toLowerCase().includes('price'))) ||
           (id && id.toLowerCase().includes('price'))
         ) {
-          let potentialPrice = el.rawText.replace(/[^\d.,-]/g, '');
-          if (potentialPrice) {
-            potentialPrice = potentialPrice.replace(',', '.');
-            price = potentialPrice;
+          const potentialPrice = priceRegex.exec(el.rawText);
+          if (potentialPrice && price === "0") {
+            price = potentialPrice[0];
           }
         }
       });
     }
 
     elapsedTime = Date.now() - startTime;
-    console.log(`Scraped ${url} in ${elapsedTime}ms`);
-
-    db.prepare(`INSERT INTO scraped_data (url, domain, price, success, last_updated) VALUES (?, ?, ?, ?, ?)`)
-      .run(url, domain, price, success ? 1 : 0, currentTimeStamp);
-
-    return {
-      url: url,
-      domain: domain,
-      price: price,
-      success: success,
-      lastUpdated: currentTimeStamp,
-      isCached: false
-    };
-
   } catch (error) {
-    console.error(`Error while scraping ${url}: ${error}`);
+    console.log(`Failed to scrape URL: ${url}`, error);
     success = false;
-
-    const cachedData = selectQuery.get(url, currentTime);
-
-    if (cachedData) {
-      return {
-        url: cachedData.url,
-        domain: cachedData.domain,
-        price: cachedData.price,
-        success: cachedData.success === 1,
-        lastUpdated: cachedData.last_updated,
-        isCached: true
-      };
-    }
-
-    db.prepare(`INSERT INTO scraped_data (url, domain, price, success, last_updated) VALUES (?, ?, ?, ?, ?)`)
-      .run(url, domain, price, success ? 1 : 0, currentTimeStamp);
-
-    return {
-      url: url,
-      domain: domain,
-      price: price,
-      success: success,
-      lastUpdated: currentTimeStamp,
-      isCached: false
-    };
   }
+
+  const insertQuery = db.prepare(`
+    INSERT INTO scraped_data (url, domain, price, success, last_updated)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+
+  insertQuery.run(url, domain, price, success ? 1 : 0, currentTimeStamp);
+
+  return {
+    url,
+    domain,
+    price,
+    success,
+    elapsedTime,
+    isCached: false
+  };
 };
 
-
-app.get('/scrape', async (req, res) => {
-  const { url, cacheExpiryMinutes = 60 } = req.query;
-
-  if (!url) {
-    return res.status(400).json({
-      error: 'Missing URL parameter'
-    });
-  }
-
-  const urls = url.split(',');
+app.post('/scrape', async (req, res) => {
+  const urls = req.body.urls || [];
+  const cacheExpiryMinutes = req.body.cacheExpiryMinutes || 60;
 
   try {
-    const prices = await Promise.all(urls.map(url => scrapePrice(url, cacheExpiryMinutes)));
+    const results = await Promise.allSettled(urls.map(url => scrapePrice(url, cacheExpiryMinutes)));
+
+    const prices = results
+      .filter(result => result.status === 'fulfilled')
+      .map(result => result.value);
 
     const numericPrices = prices.map(pair => parseFloat(pair.price)).filter(price => price > 0);
 
@@ -186,25 +160,31 @@ app.get('/scrape', async (req, res) => {
   }
 });
 
-app.post('/scrape', async (req, res) => {
-  const { urls, cacheExpiryMinutes = 60 } = req.body;
+app.get('/scrape', async (req, res) => {
+  const { url, cacheExpiryMinutes = 60 } = req.query;
 
-  if (!urls) {
+  if (!url) {
     return res.status(400).json({
-      error: 'Missing urls in request body'
+      error: 'Missing URL parameter'
     });
   }
 
-  try {
-    const prices = await Promise.all(urls.map(url => scrapePrice(url, cacheExpiryMinutes)));
+  const urls = url.split(',');
 
-    if (!prices.length || prices.some(pair => pair.price === undefined)) {
+  try {
+    const results = await Promise.allSettled(urls.map(url => scrapePrice(url, cacheExpiryMinutes)));
+
+    const prices = results
+      .filter(result => result.status === 'fulfilled')
+      .map(result => result.value);
+
+    const numericPrices = prices.map(pair => parseFloat(pair.price)).filter(price => price > 0);
+
+    if (!numericPrices.length) {
       return res.status(404).json({
         error: 'Price(s) not found'
       });
     }
-
-    const numericPrices = prices.map(pair => parseFloat(pair.price)).filter(price => price > 0);
 
     const bestPrice = Math.min(...numericPrices);
     const worstPrice = Math.max(...numericPrices);
@@ -235,6 +215,8 @@ app.post('/scrape', async (req, res) => {
     });
   }
 });
+
+
 
 app.get('/export', (req, res) => {
   const query = `SELECT * FROM scraped_data`;
@@ -267,5 +249,5 @@ app.get('/export', (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Scraper app listening at http://localhost:${port}`);
+  console.log(`Server started at http://localhost:${port}`);
 });
