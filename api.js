@@ -22,13 +22,18 @@ stmt.run();
 
 app.use(express.json());
 
+const domainSelectors = [
+  { domain: "example.com", selector: "#product-price > span" }
+  // Add more domain-specific selectors here
+];
+
 const scrapePrice = async (url, cacheExpiryMinutes) => {
-  const startTime = Date.now(); 
-  let price = "0"; // default price
+  const startTime = Date.now();
+  let price = "0";
   let success = true;
-  const domain = new urlModule.URL(url).hostname.replace('www.', ''); // remove www.
+  const domain = new urlModule.URL(url).hostname.replace('www.', '');
   const selectQuery = db.prepare(`SELECT * FROM scraped_data WHERE url = ? AND last_updated > ?`);
-  const currentTime = Date.now() - cacheExpiryMinutes * 60 * 1000; // Calculate the expiry time in milliseconds
+  const currentTime = Date.now() - cacheExpiryMinutes * 60 * 1000;
   const currentTimeStamp = Date.now();
   let elapsedTime;
 
@@ -50,21 +55,32 @@ const scrapePrice = async (url, cacheExpiryMinutes) => {
     const root = parse(data);
     const priceRegex = /\d+(\.\d{1,2})?/;
 
-root.querySelectorAll('*').forEach(el => {
-  const classAttr = el.getAttribute('class') || '';
-  const id = el.getAttribute('id') || '';
-  const classNames = classAttr.split(' ');
-  
-  if (
-    (classNames && classNames.some(className => className.toLowerCase().includes('price'))) ||
-    (id && id.toLowerCase().includes('price'))
-  ) {
-    const potentialPrice = priceRegex.exec(el.rawText);
-    if (potentialPrice && price === "0") {
-      price = potentialPrice[0];
+    const domainSpecificSelector = domainSelectors.find(e => e.domain === domain);
+    if (domainSpecificSelector) {
+      const priceElement = root.querySelector(domainSpecificSelector.selector);
+      if (priceElement) {
+        const potentialPrice = priceRegex.exec(priceElement.rawText);
+        if (potentialPrice) {
+          price = potentialPrice[0];
+        }
+      }
+    } else {
+      root.querySelectorAll('*').forEach(el => {
+        const classAttr = el.getAttribute('class') || '';
+        const id = el.getAttribute('id') || '';
+        const classNames = classAttr.split(' ');
+        
+        if (
+          (classNames && classNames.some(className => className.toLowerCase().includes('price'))) ||
+          (id && id.toLowerCase().includes('price'))
+        ) {
+          const potentialPrice = priceRegex.exec(el.rawText);
+          if (potentialPrice && price === "0") {
+            price = potentialPrice[0];
+          }
+        }
+      });
     }
-  }
-});
 
 elapsedTime = Date.now() - startTime;
 console.log(`Scraped ${url} in ${elapsedTime}ms`);
