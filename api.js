@@ -25,6 +25,13 @@ stmt.run();
 app.use(express.json());
 
 const domainOverrides = [
+  { domain: "davincivaporizer.com", selector: "#price-template--18478448902426__main > div > div.price__container.price-section > div.price__regular > span.price-item.price-item--regular.price--withoutTax", decimalSeparator: '.' },
+  { domain: "ryot.com", "selector": "bdi", decimalSeparator: '.' },
+  { domain: "vapefully.com", selector: 'bdi', decimalSeparator: ','},
+  { domain: "headshop.com", selector: '#PriceA11y-template--16835002237167__main', decimalSeparator: ','},
+  { domain: "storz-bickel.com", selector: "#product-price-17942 > span", decimalSeparator: "," },
+  { domain: "headshop.com", selector: "#PriceA11y-template--16835002237167__main"},
+  { domain: "vapor.com", selector: "price__regular"}
   // Add your domain-specific configurations here
   // Example: { domain: "example.com", selector: "#product-price-17942 > span", decimalSeparator: ',' }
 ];
